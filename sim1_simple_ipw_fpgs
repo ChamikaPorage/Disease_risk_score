@@ -4,8 +4,6 @@
 # outcome-model predictions under T=0 and T=1
 #
 # Hajage DGP B + geex sandwich SE + MC bias/MSE/coverage
-#
-# NOTE: This script runs WITHOUT an estimate_one() wrapper.
 ############################################################
 
 suppressPackageStartupMessages({
@@ -13,7 +11,6 @@ suppressPackageStartupMessages({
   library(stats)
 })
 
-# ---------- helpers ----------
 clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) pmin(pmax(p, lo), hi)
 expit  <- function(x) 1/(1 + exp(-x))
 
@@ -26,9 +23,9 @@ Beta_vec  <- c(log(1.5), log(2), log(2.5),
                0, 0, 0,
                log(1.5), log(2), log(2.5))
 
-# ============================================================
-# Hajage DGP B (returns y, tr, x1..x9)
-# ============================================================
+# ==================
+# Hajage DGP B 
+# ==================
 gen.data.B <- function(N, seed, n_rep = 1, alpha0, beta0, gamma, delta = log(2)) {
   set.seed(seed)
   datat <- vector("list", n_rep)
@@ -101,7 +98,6 @@ ipw_geex_fpgs <- function(dat, xvars = NULL, ps_intercept = TRUE) {
   Z_design <- if (ps_intercept) cbind(`(Intercept)` = 1, Z_core) else Z_core
   pg <- ncol(Z_design)
   
-  # IMPORTANT: intercept=FALSE because we manually include it when ps_intercept=TRUE
   fitps  <- glm.fit(x = Z_design, y = Tt, family = binomial(), intercept = FALSE)
   gamma0 <- as.numeric(coef(fitps)); gamma0[is.na(gamma0)] <- 0
   e0     <- clip01(expit(drop(Z_design %*% gamma0)))
@@ -113,7 +109,7 @@ ipw_geex_fpgs <- function(dat, xvars = NULL, ps_intercept = TRUE) {
   
   theta0 <- c(beta1_0, beta0_0, gamma0, mu1_0, mu0_0, tau_0)
   
-  # data passed to geex (keep X1 columns)
+  # data passed to geex 
   units <- data.frame(
     Y  = Y,
     Tt = Tt,
@@ -173,9 +169,9 @@ ipw_geex_fpgs <- function(dat, xvars = NULL, ps_intercept = TRUE) {
   )
 }
 
-# ============================================================
+# ========================
 # Summary function
-# ============================================================
+# ========================
 summarize_results <- function(res, alpha = 0.05) {
   z <- qnorm(1 - alpha/2)
   ok <- is.finite(res$tau) & is.finite(res$se) & res$se > 0 & is.finite(res$truth)
@@ -197,9 +193,9 @@ summarize_results <- function(res, alpha = 0.05) {
   )
 }
 
-# ============================================================
+# =================
 # RUN
-# ============================================================
+# =================
 cat("\n########################################\n")
 cat("# Simple IPW (HT) with FPGS-based PS   #\n")
 cat("# on Hajage DGP B                      #\n")
@@ -209,13 +205,13 @@ N    <- 1000
 R    <- 1000
 seed <- 2025
 
-# DGP parameters (choose your scenario)
+# DGP parameters 
 alpha0 <- -1.5
 beta0  <- -2
 gamma  <- log(1.5)
 delta  <- log(2)
 
-# fixed population truth (set this to your scenario's true ATE)
+# fixed population truth ATE
 truth_pop <- 0.073
 
 # simulate datasets
@@ -224,7 +220,7 @@ datasets <- gen.data.B(
   alpha0 = alpha0, beta0 = beta0, gamma = gamma, delta = delta
 )
 
-# Monte Carlo results (NO estimate_one wrapper)
+# Monte Carlo results 
 res <- do.call(rbind, lapply(datasets, function(d) {
   
   # rename to match estimator
@@ -264,7 +260,7 @@ abline(h = unique(na.omit(res$truth)), lty = 2)
 library(ggplot2)
 
 S1_SIPW_fpgs <- res |> dplyr::filter(!is.na(tau))
-write.csv(S1_SIPW_fpgs, file = "C:/Users/chapo752/Dropbox/PhD work- Chamika Porage/Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S1_sipw_fpgs.csv", row.names = FALSE)
+write.csv(S1_SIPW_fpgs, file = ".../Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S1_sipw_fpgs.csv", row.names = FALSE)
 
 ggplot(res2, aes(x = "", y = tau)) +
   geom_boxplot() +
