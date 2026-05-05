@@ -13,7 +13,6 @@ suppressPackageStartupMessages({
   library(stats)
 })
 
-# ---------------- helpers ----------------
 clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) pmin(pmax(p, lo), hi)
 expit  <- function(x) 1/(1 + exp(-x))
 
@@ -110,7 +109,7 @@ ipw_geex_simple <- function(dat, xvars = NULL) {
   
   if (is.null(xvars)) xvars <- grep("^X[0-9]+$", names(dat), value = TRUE)
   
-  X <- model.matrix(reformulate(xvars), data = dat)  # includes intercept
+  X <- model.matrix(reformulate(xvars), data = dat)  
   p <- ncol(X)
   Xnames <- colnames(X)
   
@@ -171,9 +170,9 @@ ipw_geex_simple <- function(dat, xvars = NULL) {
   )
 }
 
-# ============================================================
-# Summary function (MATCHES your Hajage format)
-# ============================================================
+# ===========
+# Summary 
+# ===========
 summarize_results <- function(res, alpha = 0.05) {
   z <- qnorm(1 - alpha/2)
   
@@ -196,11 +195,11 @@ summarize_results <- function(res, alpha = 0.05) {
   )
 }
 
-# ============================================================
+# =================
 # RUN
-# ============================================================
+# =================
 cat("\n#############################\n")
-cat("# Simulation: Witte & Didelez (Setup 1) — Simple IPW (HT)\n")
+cat("# Simulation: Witte & Didelez (PGS) — Simple IPW (HT)\n")
 cat("#############################\n")
 
 N    <- 1000
@@ -239,4 +238,4 @@ cat("\nSummary:\n")
 print(round(summarize_results(res), 3))
 
 S2_SIPW_pgs <- res |> dplyr::filter(!is.na(tau))
-write.csv(S2_SIPW_pgs, file = "C:/Users/chapo752/Dropbox/PhD work- Chamika Porage/Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S2_sipw_pgs.csv", row.names = FALSE)
+write.csv(S2_SIPW_pgs, file = "..../Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S2_sipw_pgs.csv", row.names = FALSE)
