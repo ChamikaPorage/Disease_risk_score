@@ -1,0 +1,218 @@
+############################################################
+# Normalized IPW (Hájek) on Hajage DGP B (PS on raw X)
+# Sandwich variance via geex + MC bias/MSE/SD/mean SE/coverage
+#############################################################
+
+suppressPackageStartupMessages({
+  library(geex)
+  library(stats)
+})
+
+clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) pmin(pmax(p, lo), hi)
+expit  <- function(x) 1/(1 + exp(-x))
+
+# ---------- coefficient vectors ----------
+Alpha_vec <- c(log(1.5), log(2), log(2.5),
+               log(1.5), log(2), log(2.5),
+               0, 0, 0)
+
+Beta_vec  <- c(log(1.5), log(2), log(2.5),
+               0, 0, 0,
+               log(1.5), log(2), log(2.5))
+
+# ============================================================
+# Hajage DGP B
+# ============================================================
+gen.data.B <- function(N, seed, n_rep, alpha0, beta0, gamma, delta = log(2)) {
+  set.seed(seed)
+  datat <- vector("list", n_rep)
+  
+  i <- 0
+  while (i < n_rep) {
+    X <- matrix(rnorm(N * 9), ncol = 9)
+    colnames(X) <- paste0("x", 1:9)
+    
+    ps_true <- clip01(plogis(alpha0 + drop(X %*% Alpha_vec)))
+    tr <- rbinom(N, 1, ps_true)
+    if (length(unique(tr)) < 2) next
+    
+    x2  <- X[, "x2"]
+    lp0 <- beta0 + drop(X %*% Beta_vec)
+    pY0 <- clip01(plogis(lp0))
+    pY1 <- clip01(plogis(lp0 + gamma + delta * x2))
+    
+    y <- rbinom(N, 1, ifelse(tr == 1, pY1, pY0))
+    
+    datat[[i + 1]] <- data.frame(y = y, tr = tr, X, check.names = FALSE)
+    i <- i + 1
+  }
+  
+  datat
+}
+
+# ============================================================
+# Normalized IPW (Hájek) + sandwich SE via geex
+# PS model: logistic Tr ~ X  (X includes intercept)
+#
+# theta = (gamma[p], a1, b1, a0, b0, mu1, mu0, tau)
+# length(theta) = p + 7
+# ============================================================
+nipw_geex <- function(dat, xvars) {
+  stopifnot(all(c("Y","Tr") %in% names(dat)))
+  
+  X <- model.matrix(reformulate(xvars), data = dat)  # includes intercept
+  p <- ncol(X)
+  Xnames <- colnames(X)
+  
+  Y  <- dat$Y
+  Tt <- dat$Tr
+  
+  # ----- PS -----
+  fitps  <- glm.fit(x = X, y = Tt, family = binomial(), intercept = FALSE)
+  gamma0 <- as.numeric(coef(fitps)); gamma0[is.na(gamma0)] <- 0
+  e0     <- clip01(expit(drop(X %*% gamma0)))
+  
+  # ----- Hájek plug-ins -----
+  a1_0  <- mean(Tt * Y / e0)
+  b1_0  <- mean(Tt / e0)
+  a0_0  <- mean((1 - Tt) * Y / (1 - e0))
+  b0_0  <- mean((1 - Tt) / (1 - e0))
+  mu1_0 <- a1_0 / b1_0
+  mu0_0 <- a0_0 / b0_0
+  tau_0 <- mu1_0 - mu0_0
+  
+  theta0 <- c(gamma0, a1_0, b1_0, a0_0, b0_0, mu1_0, mu0_0, tau_0)
+  
+  # keep (Intercept) name
+  units <- data.frame(
+    Y  = Y,
+    Tt = Tt,
+    as.data.frame(X, check.names = FALSE),
+    check.names = FALSE
+  )
+  
+  estFUN <- function(data) {
+    function(theta) {
+      gamma <- theta[1:p]
+      a1    <- theta[p + 1]
+      b1    <- theta[p + 2]
+      a0    <- theta[p + 3]
+      b0    <- theta[p + 4]
+      mu1   <- theta[p + 5]
+      mu0   <- theta[p + 6]
+      tau   <- theta[p + 7]   
+      
+      x <- as.numeric(unlist(data[Xnames], use.names = FALSE))
+      e <- clip01(expit(sum(x * gamma)))
+      
+      c(
+        # PS score
+        (data$Tt - e) * x,
+        
+        # Hájek numerator/denominator moments
+        a1 - data$Tt * data$Y / e,
+        b1 - data$Tt / e,
+        a0 - (1 - data$Tt) * data$Y / (1 - e),
+        b0 - (1 - data$Tt) / (1 - e),
+        
+        # ratio constraints
+        mu1 - a1 / b1,
+        mu0 - a0 / b0,
+        
+        # tau 
+        tau - (mu1 - mu0)
+      )
+    }
+  }
+  
+  fit <- geex::m_estimate(
+    estFUN        = estFUN,
+    data          = units,
+    roots         = theta0,
+    compute_roots = FALSE
+  )
+  
+  th <- coef(fit)
+  V  <- vcov(fit)
+  
+  idx_tau <- p + 7  
+  
+  list(
+    tau_hat = unname(th[idx_tau]),
+    se_tau  = sqrt(V[idx_tau, idx_tau])
+  )
+}
+
+# ===================
+# Summary 
+# ===================
+summarize_results <- function(res, alpha = 0.05) {
+  z <- qnorm(1 - alpha/2)
+  
+  ok <- is.finite(res$tau) & is.finite(res$se) & res$se > 0 & is.finite(res$truth)
+  r <- res[ok, , drop = FALSE]
+  
+  ci_lo <- r$tau - z * r$se
+  ci_hi <- r$tau + z * r$se
+  
+  data.frame(
+    R_used     = nrow(r),
+    n_fail     = nrow(res) - nrow(r),
+    mean_tau   = mean(r$tau),
+    truth_used = unique(r$truth)[1],
+    bias       = mean(r$tau - r$truth),
+    mse        = mean((r$tau - r$truth)^2),
+    emp_sd     = sd(r$tau),
+    mean_se    = mean(r$se),
+    cover_95   = mean(ci_lo <= r$truth & r$truth <= ci_hi)
+  )
+}
+
+# =============
+# RUN 
+# =============
+cat("\n########################################\n")
+cat("# NIPW (Hájek) on Hajage DGP B (PS on raw X)\n")
+cat("########################################\n")
+
+N    <- 1000
+R    <- 1000
+seed <- 2025
+
+alpha0 <- -1.5
+beta0  <- -2
+gamma  <- log(1.5)
+delta  <- log(2)
+
+truth_pop <- 0.073
+
+datasets <- gen.data.B(
+  N = N, seed = seed, n_rep = R,
+  alpha0 = alpha0, beta0 = beta0, gamma = gamma, delta = delta
+)
+
+res <- do.call(rbind, lapply(datasets, function(d) {
+  
+  d$Y  <- d$y
+  d$Tr <- d$tr
+  
+  xvars <- grep("^x[0-9]+$", names(d), value = TRUE)
+  d2 <- d[, c("Y", "Tr", xvars), drop = FALSE]
+  
+  fit <- tryCatch(nipw_geex(d2, xvars = xvars), error = function(e) NULL)
+  
+  if (is.null(fit) || !is.finite(fit$tau_hat) || !is.finite(fit$se_tau) || fit$se_tau <= 0) {
+    return(data.frame(tau = NA_real_, se = NA_real_, truth = truth_pop))
+  }
+  
+  data.frame(tau = fit$tau_hat, se = fit$se_tau, truth = truth_pop)
+}))
+
+cat("\nFirst 3 rows:\n")
+print(head(res, 3))
+
+cat("\nSummary:\n")
+print(round(summarize_results(res), 3))
+
+S1_NIPW_pgs <- res |> dplyr::filter(!is.na(tau))
+write.csv(S1_NIPW_pgs, file = ".../Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S1_nipw_pgs.csv", row.names = FALSE)
