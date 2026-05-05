@@ -262,6 +262,9 @@ library(ggplot2)
 S1_SIPW_fpgs <- res |> dplyr::filter(!is.na(tau))
 write.csv(S1_SIPW_fpgs, file = ".../Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S1_sipw_fpgs.csv", row.names = FALSE)
 
+# =================
+# Figure of boxplots
+# =================
 ggplot(res2, aes(x = "", y = tau)) +
   geom_boxplot() +
   geom_hline(yintercept = unique(res2$truth)[1], linetype = 2) +
