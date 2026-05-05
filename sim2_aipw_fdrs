@@ -1,0 +1,306 @@
+##############################
+# Witte & Didelez (2018)
+# Setup 1, mixed-scale covs
+# Binary outcome + EM (X2*T)
+#
+# AIPW : PS on FDRS
+# Sandwich variance via geex + MC bias/MSE/SD/mean SE/coverage
+# Fixed population truth ATE = 0.227
+##############################
+
+suppressPackageStartupMessages({
+  library(geex)
+  library(stats)
+})
+
+clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) pmin(pmax(p, lo), hi)
+expit  <- function(x) 1/(1 + exp(-x))
+
+#######################################
+# 1. Parameters for mixed-scale setup #
+#######################################
+beta3_U  <- 1
+beta8_2  <- 1
+betaT1   <- 1
+betaT2   <- 1
+betaY_U  <- 1
+betaY5   <- 1
+
+beta5_4  <- 3
+beta8_6  <- 3
+betaT3   <- 3
+betaT4   <- 3
+betaY6   <- 3
+betaY7   <- 3
+
+betaT0   <- 0.7
+betaY0   <- 1.1
+betaY_T  <- 1.5   # effective treatment (binary outcome)
+
+#########################################
+# 2. Data generator: setup 1, mixed EM  #
+#########################################
+gen.data.C <- function(N, seed, n_rep = 1, delta = log(2)) {
+  set.seed(seed)
+  datat <- vector("list", n_rep)
+  
+  p_bin <- plogis(-2)  # ~0.119
+  
+  i <- 0
+  while (i < n_rep) {
+    
+    # --- exogenous / baseline ---
+    U  <- rnorm(N)
+    X1 <- rnorm(N)
+    X2 <- rnorm(N)
+    
+    # --- mixed-scale covariates ---
+    pX3 <- plogis(-2 + beta3_U * U)
+    X3  <- rbinom(N, 1, pX3)
+    
+    X4 <- rbinom(N, 1, p_bin)
+    X6 <- rbinom(N, 1, p_bin)
+    X7 <- rbinom(N, 1, p_bin)
+    X9 <- rbinom(N, 1, p_bin)
+    
+    X5 <- as.numeric(scale(beta5_4 * X4 + rnorm(N)))
+    X8 <- as.numeric(scale(beta8_2 * X2 + beta8_6 * X6 + rnorm(N)))
+    
+    # --- treatment model ---
+    lp_T <- -betaT0 + betaT1*X1 + betaT2*X2 + betaT3*X3 + betaT4*X4
+    ps_true <- plogis(lp_T)
+    tr <- rbinom(N, 1, ps_true)
+    if (length(unique(tr)) < 2) next
+    
+    # --- outcome model (binary) with EM in Y(1) ---
+    base_lp <- -betaY0 + betaY_U*U + betaY5*X5 + betaY6*X6 + betaY7*X7
+    lp_Y0 <- base_lp
+    lp_Y1 <- base_lp + betaY_T + delta * X2
+    
+    pY0_true <- plogis(lp_Y0)
+    pY1_true <- plogis(lp_Y1)
+    
+    y0 <- rbinom(N, 1, pY0_true)
+    y1 <- rbinom(N, 1, pY1_true)
+    y  <- ifelse(tr == 1, y1, y0)
+    
+    dat <- data.frame(
+      y  = y,
+      tr = tr,
+      X1 = X1, X2 = X2, X3 = X3, X4 = X4,
+      X5 = X5, X6 = X6, X7 = X7, X8 = X8, X9 = X9,
+      U  = U
+    )
+    
+    i <- i + 1
+    datat[[i]] <- dat
+  }
+  
+  datat
+}
+
+# ============================================================
+# AIPW with FDRS-based OR + PS  + sandwich SE
+#
+# PS uses augmented regressor (1, m1, m0).
+#
+# theta = (beta1[K], beta0[K], alpha1[3], alpha0[3], gamma[3], mu1, mu0, tau)
+# total length = 2K + 3 + 3 + 3 + 3 = 2K + 12
+# ============================================================
+aipw_geex_fdrs <- function(dat, xvars = NULL) {
+  stopifnot(all(c("Y","Tr") %in% names(dat)))
+  if (is.null(xvars)) xvars <- grep("^x[0-9]+$", names(dat), value = TRUE)
+  
+  # Raw X design matrix (includes intercept by default)
+  X1 <- model.matrix(reformulate(xvars), data = dat)
+  K  <- ncol(X1)
+  Xnames <- colnames(X1)
+  
+  Y  <- dat$Y
+  Tt <- dat$Tr
+  
+  # ----- Stage 1: Outcome models on raw X (linear) -----
+  fit1 <- lm.fit(x = X1[Tt == 1, , drop = FALSE], y = Y[Tt == 1])
+  fit0 <- lm.fit(x = X1[Tt == 0, , drop = FALSE], y = Y[Tt == 0])
+  
+  beta1_0 <- as.numeric(coef(fit1)); beta1_0[is.na(beta1_0)] <- 0
+  beta0_0 <- as.numeric(coef(fit0)); beta0_0[is.na(beta0_0)] <- 0
+  
+  m1_0 <- as.numeric(X1 %*% beta1_0)
+  m0_0 <- as.numeric(X1 %*% beta0_0)
+  
+  # FDRS regressors (2-dim): [m1, m0]
+  Xf_core <- cbind(m1 = m1_0, m0 = m0_0)  # n x 2
+  
+  # Augmented FDRS regressor WITH intercept: [1, m1, m0]
+  Xf <- cbind(`(Intercept)` = 1, Xf_core) # n x 3
+  pg <- ncol(Xf)  # = 3
+  
+  # ----- Stage 2: Outcome models on augmented FDRS (linear) -----
+  fit_mu1 <- lm.fit(x = Xf[Tt == 1, , drop = FALSE], y = Y[Tt == 1])
+  fit_mu0 <- lm.fit(x = Xf[Tt == 0, , drop = FALSE], y = Y[Tt == 0])
+  
+  alpha1_0 <- as.numeric(coef(fit_mu1)); alpha1_0[is.na(alpha1_0)] <- 0
+  alpha0_0 <- as.numeric(coef(fit_mu0)); alpha0_0[is.na(alpha0_0)] <- 0
+  
+  mu1x_0 <- as.numeric(Xf %*% alpha1_0)
+  mu0x_0 <- as.numeric(Xf %*% alpha0_0)
+  
+  # ----- PS model on augmented FDRS WITH intercept (logistic) -----
+  # We already included the intercept column in Xf, so keep intercept=FALSE here.
+  fitps  <- glm.fit(x = Xf, y = Tt, family = binomial(), intercept = FALSE)
+  gamma0 <- as.numeric(coef(fitps)); gamma0[is.na(gamma0)] <- 0
+  e0     <- clip01(expit(drop(Xf %*% gamma0)))
+  
+  # ----- AIPW plug-in  -----
+  mu1_0 <- mean(mu1x_0 + Tt * (Y - mu1x_0) / e0)
+  mu0_0 <- mean(mu0x_0 + (1 - Tt) * (Y - mu0x_0) / (1 - e0))
+  tau_0 <- mu1_0 - mu0_0
+  
+  theta0 <- c(beta1_0, beta0_0, alpha1_0, alpha0_0, gamma0, mu1_0, mu0_0, tau_0)
+  
+  # data passed to geex 
+  units <- data.frame(
+    Y  = Y,
+    Tt = Tt,
+    as.data.frame(X1, check.names = FALSE),
+    check.names = FALSE
+  )
+  
+  estFUN <- function(data) {
+    function(theta) {
+      beta1  <- theta[1:K]
+      beta0  <- theta[K + (1:K)]
+      alpha1 <- theta[2*K + (1:pg)]
+      alpha0 <- theta[2*K + pg + (1:pg)]
+      gamma  <- theta[2*K + 2*pg + (1:pg)]
+      mu1    <- theta[2*K + 3*pg + 1]
+      mu0    <- theta[2*K + 3*pg + 2]
+      tau    <- theta[2*K + 3*pg + 3]
+      
+      x1 <- as.numeric(unlist(data[Xnames], use.names = FALSE))
+      
+      # Stage 1: m1, m0 on raw X1
+      m1 <- sum(x1 * beta1)
+      m0 <- sum(x1 * beta0)
+      
+      # Augmented FDRS regressor WITH intercept: xf = [1, m1, m0]
+      xf <- c(1, m1, m0)
+      
+      # Stage 2: mu1(x), mu0(x) on augmented FDRS
+      mu1x <- sum(alpha1 * xf)
+      mu0x <- sum(alpha0 * xf)
+      
+      # PS on augmented FDRS
+      e <- clip01(expit(sum(gamma * xf)))
+      
+      # --- stacked estimating equations ---
+      
+      # Stage 1 score equations for beta's (linear)
+      psi_b1 <- (data$Tt)     * (data$Y - m1) * x1
+      psi_b0 <- (1 - data$Tt) * (data$Y - m0) * x1
+      
+      # Stage 2 score equations for alpha's (linear on augmented FDRS)
+      psi_a1 <- (data$Tt)     * (data$Y - mu1x) * xf
+      psi_a0 <- (1 - data$Tt) * (data$Y - mu0x) * xf
+      
+      # PS score on augmented FDRS
+      psi_g  <- (data$Tt - e) * xf
+      
+      # AIPW plug-in moments
+      psi_mu1 <- mu1 - (mu1x + data$Tt * (data$Y - mu1x) / e)
+      psi_mu0 <- mu0 - (mu0x + (1 - data$Tt) * (data$Y - mu0x) / (1 - e))
+      psi_tau <- tau - (mu1 - mu0)
+      
+      c(psi_b1, psi_b0, psi_a1, psi_a0, psi_g, psi_mu1, psi_mu0, psi_tau)
+    }
+  }
+  
+  fit <- geex::m_estimate(
+    estFUN        = estFUN,
+    data          = units,
+    roots         = theta0,
+    compute_roots = FALSE
+  )
+  
+  th <- coef(fit)
+  V  <- vcov(fit)
+  
+  idx_tau <- 2*K + 3*pg + 3
+  
+  list(
+    tau_hat = unname(th[idx_tau]),
+    se_tau  = sqrt(V[idx_tau, idx_tau])
+  )
+}
+# ==========
+# Summary 
+# ==========
+summarize_results <- function(res, alpha = 0.05) {
+  z <- qnorm(1 - alpha/2)
+  
+  ok <- is.finite(res$tau) & is.finite(res$se) & res$se > 0 & is.finite(res$truth)
+  r <- res[ok, , drop = FALSE]
+  
+  ci_lo <- r$tau - z * r$se
+  ci_hi <- r$tau + z * r$se
+  
+  data.frame(
+    R_used     = nrow(r),
+    n_fail     = nrow(res) - nrow(r),
+    mean_tau   = mean(r$tau),
+    truth_used = unique(r$truth)[1],
+    bias       = mean(r$tau - r$truth),
+    mse        = mean((r$tau - r$truth)^2),
+    emp_sd     = sd(r$tau),
+    mean_se    = mean(r$se),
+    cover_95   = mean(ci_lo <= r$truth & r$truth <= ci_hi)
+  )
+}
+
+# ===========
+# RUN
+# ===========
+cat("\n#############################\n")
+cat("# Simulation: Witte & Didelez (Setup 1) — AIPW based on FDRS\n")
+cat("#############################\n")
+
+N     <- 1000
+R     <- 1000
+seed  <- 2025
+delta <- log(2)
+
+truth_pop <- 0.227  # fixed population truth
+
+datasets <- gen.data.C(N = N, seed = seed, n_rep = R, delta = delta)
+
+res <- do.call(rbind, lapply(datasets, function(d) {
+  
+  # rename
+  d$Y  <- d$y
+  d$Tr <- d$tr
+  
+  # keep only Y, Tr, X1..X9 (exclude U)
+  xvars <- grep("^X[0-9]+$", names(d), value = TRUE)
+  d2 <- d[, c("Y","Tr", xvars), drop = FALSE]
+  
+  fit <- tryCatch(
+    aipw_geex_fdrs(d2, xvars = xvars),
+    error = function(e) NULL
+  )
+  
+  if (is.null(fit) || !is.finite(fit$tau_hat) || !is.finite(fit$se_tau) || fit$se_tau <= 0) {
+    return(data.frame(tau = NA_real_, se = NA_real_, truth = truth_pop))
+  }
+  
+  data.frame(tau = fit$tau_hat, se = fit$se_tau, truth = truth_pop)
+}))
+
+cat("\nFirst 3 rows:\n")
+print(head(res, 3))
+
+cat("\nSummary:\n")
+print(round(summarize_results(res), 3))
+
+S2_AIPW_fpgs <- res |> dplyr::filter(!is.na(tau))
+write.csv(S2_AIPW_fpgs, file = "...../Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S2_aipw_fpgs.csv", row.names = FALSE)
