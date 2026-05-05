@@ -1,0 +1,258 @@
+#load required packages
+library(devtools)
+library(boot)
+library(MASS) 
+library(xtable)
+library(PSW)
+library(iWeigReg)
+library(cobalt)
+library(WeightIt)
+library(table1)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+#read data from dfmale.csv and for_table8.csv
+datat <- read.csv(file = "...../Paper3_Disease risk score/Simulation_study/Simulation_new/Empirical analysis/final_df.csv")
+
+#covariates
+X.matrix <- model.matrix(smoking ~ gender + age + race + army.service + edu + married.living.with.partner + income.to.poverty + birth.country + family.size , data = datat)
+dat.X <- as.data.frame(X.matrix)
+dat.X <- dat.X[,-1]
+colnames(dat.X)
+dat <- cbind(datat$smoking, datat$HTN, dat.X)
+names(dat)<- c("smoking", "HTN", LETTERS[1:15])
+
+#PS MODELS
+clip01 <- function(p, eps = 1e-6) {
+  pmin(pmax(p, eps), 1 - eps)
+}
+
+#PS
+mod.ps <- glm(smoking ~ A+B+C+D+E+F+G+H+I+J+K+L+M+N+O, family = binomial, data = dat)
+ps <- fitted.values(mod.ps, type = "response") 
+datat$ps <- ps
+ps <- clip01(ps)
+
+#Checking for overlap estimation
+datat$smoking_f <- factor(
+  datat$smoking,
+  levels = c(0, 1),
+  labels = c("Non-smokers", "Smokers")
+)
+
+ggplot(datat, aes(x = ps)) +
+  geom_histogram(
+    data = subset(datat, smoking_f == "Non-smokers"),
+    aes(y = after_stat(count), fill = smoking_f),
+    bins = 30,
+    color = "black"
+  ) +
+  geom_histogram(
+    data = subset(datat, smoking_f == "Smokers"),
+    aes(y = -after_stat(count), fill = smoking_f),
+    bins = 30,
+    color = "black"
+  ) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "Non-smokers" = "grey70",
+      "Smokers" = "grey30"
+    ),
+    name = "Smoking status"
+  ) +
+  labs(
+    x = "Propensity score",
+    y = "Count",
+    title = "Propensity score distributions by smoking status"
+  ) +
+  theme_classic(base_size = 13)
+
+# Subsetting data
+data0 <- subset(dat, smoking == 0)
+data1 <- subset(dat, smoking == 1)
+
+#Outcome Regression models(DRS)
+
+#TRUE OR
+mod0 <- glm(HTN ~ A+B+C+D+E+F+G+H+I+J+K+L+M+N+O, family = binomial, data = data0)
+d0 <- predict(mod0, newdata = dat, type = "response")
+d0 <-clip01(d0)
+
+mod1 <- glm(HTN ~ A+B+C+D+E+F+G+H+I+J+K+L+M+N+O, family = binomial, data = data1)
+d1 <- predict(mod1, newdata = dat, type = "response")
+d1 <-clip01(d1)
+
+Dat<-cbind.data.frame(dat$HTN,dat$smoking,ps,d0,d1)
+colnames(Dat) <- c('HTN','smoking','ps', 'd0','d1')
+
+#FDRS-based PS
+#PS
+mod.ps.fdrs <- glm(smoking ~ d0+d1, family = binomial, data = Dat)
+ps_fdrs <- fitted.values(mod.ps.fdrs, type = "response") 
+Dat$ps_fdrs <- clip01(ps_fdrs)
+
+#Outcome Regression models(full prognostic scores)
+
+Dat1 <- subset(Dat, Dat$smoking == 1)
+Dat0 <- subset(Dat, Dat$smoking == 0)
+
+###FDRS-based outcome regression estimators
+
+model0 <- glm(HTN ~ d0+d1, family = binomial, data = Dat0)
+fd0 <- predict(model0, newdata = Dat, type = "response")
+Dat$fd0 <-clip01(fd0)
+
+model1 <- glm(HTN ~ d0+d1, family = binomial, data = Dat1)
+fd1 <- predict(model1, newdata = Dat, type = "response")
+Dat$fd1 <-clip01(fd1)
+
+####Weighting estimators####
+
+##Standard estimators##
+
+IPW_1 <- mean(Dat$smoking*Dat$HTN/Dat$ps)- mean((1-Dat$smoking)*Dat$HTN/(1-Dat$ps))
+
+IPW_2 <- mean(Dat$smoking*Dat$HTN/Dat$ps)/mean(Dat$smoking/Dat$ps)- mean((1-Dat$smoking)*Dat$HTN/(1-Dat$ps))/mean((1-Dat$smoking)/(1-Dat$ps))
+
+AIPW <- mean((Dat$smoking*Dat$HTN-(Dat$smoking-Dat$ps)*Dat$d1)/Dat$ps)-mean(((1-Dat$smoking)*Dat$HTN+(Dat$smoking-Dat$ps)*Dat$d0)/(1-Dat$ps))
+
+##FDRS_based estimators##
+
+IPW_1_fdrs <- mean(Dat$smoking*Dat$HTN/Dat$ps_fdrs)- mean((1-Dat$smoking)*Dat$HTN/(1-Dat$ps_fdrs))
+
+IPW_2_fdrs <- mean(Dat$smoking*Dat$HTN/Dat$ps_fdrs)/mean(Dat$smoking/Dat$ps_fdrs)- mean((1-Dat$smoking)*Dat$HTN/(1-Dat$ps_fdrs))/mean((1-Dat$smoking)/(1-Dat$ps_fdrs))
+
+AIPW_fdrs <- mean((Dat$smoking*Dat$HTN-(Dat$smoking-Dat$ps_fdrs)*Dat$fd1)/Dat$ps_fdrs)-mean(((1-Dat$smoking)*Dat$HTN+(Dat$smoking-Dat$ps_fdrs)*Dat$fd0)/(1-Dat$ps_fdrs))
+
+###bootstrap standard errors and 95% CIs
+
+#Standard IPW_1 estimator
+boot_ipw1 <- function(data, indices) {
+  d <- data[indices, ]
+  
+  mean(d$smoking * d$HTN / d$ps) -
+    mean((1 - d$smoking) * d$HTN / (1 - d$ps))
+}
+
+#Standard IPW_2 estimator
+boot_ipw2 <- function(data, indices) {
+  d <- data[indices, ]
+  
+  mean(d$smoking * d$HTN / d$ps) / mean(d$smoking / d$ps) -
+    mean((1 - d$smoking) * d$HTN / (1 - d$ps)) /
+    mean((1 - d$smoking) / (1 - d$ps))
+}
+
+#Standard AIPW estimator
+boot_aipw <- function(data, indices) {
+  d <- data[indices, ]
+  
+  mean((d$smoking * d$HTN - (d$smoking - d$ps) * d$d1) / d$ps) -
+    mean(((1 - d$smoking) * d$HTN + (d$smoking - d$ps) * d$d0) / (1 - d$ps))
+}
+
+#FDRS_based IPW_1 estimator
+boot_ipw1_fdrs <- function(data, indices) {
+  d <- data[indices, ]
+  
+  # FDRS-based PS
+  ps_fit <- glm(smoking ~ d0 + d1, family = binomial, data = d)
+  ps_fdrs <- clip01(predict(ps_fit, type = "response"))
+  
+  mean(d$smoking * d$HTN / ps_fdrs) -
+    mean((1 - d$smoking) * d$HTN / (1 - ps_fdrs))
+}
+
+#FDRS_based IPW_2 estimator
+boot_ipw2_fdrs <- function(data, indices) {
+  d <- data[indices, ]
+  
+  ps_fit <- glm(smoking ~ d0 + d1, family = binomial, data = d)
+  ps_fdrs <- clip01(predict(ps_fit, type = "response"))
+  
+  mean(d$smoking * d$HTN / ps_fdrs) / mean(d$smoking / ps_fdrs) -
+    mean((1 - d$smoking) * d$HTN / (1 - ps_fdrs)) /
+    mean((1 - d$smoking) / (1 - ps_fdrs))
+}
+
+#FDRS-based AIPW estimator
+boot_aipw_fdrs <- function(data, indices) {
+  d <- data[indices, ]
+  
+  # PS
+  ps_fit <- glm(smoking ~ d0 + d1, family = binomial, data = d)
+  ps_fdrs <- clip01(predict(ps_fit, type = "response"))
+  
+  # Outcome regressions
+  d1_dat <- d[d$smoking == 1, ]
+  d0_dat <- d[d$smoking == 0, ]
+  
+  m1 <- glm(HTN ~ d0 + d1, family = binomial, data = d1_dat)
+  m0 <- glm(HTN ~ d0 + d1, family = binomial, data = d0_dat)
+  
+  fd1 <- clip01(predict(m1, newdata = d, type = "response"))
+  fd0 <- clip01(predict(m0, newdata = d, type = "response"))
+  
+  mean((d$smoking * d$HTN - (d$smoking - ps_fdrs) * fd1) / ps_fdrs) -
+    mean(((1 - d$smoking) * d$HTN + (d$smoking - ps_fdrs) * fd0) / (1 - ps_fdrs))
+}
+
+R <- 1000  
+set.seed(2025)
+
+res_ipw1  <- boot(Dat, boot_ipw1,  R)
+res_ipw2  <- boot(Dat, boot_ipw2,  R)
+res_aipw  <- boot(Dat, boot_aipw,  R)
+res_ipw1_fdrs  <- boot(Dat, boot_ipw1_fdrs,  R)
+res_ipw2_fdrs  <- boot(Dat, boot_ipw2_fdrs,  R)
+res_aipw_fdrs  <- boot(Dat, boot_aipw_fdrs,  R)
+
+# Bootstrap SE
+se_ipw1 <- sd(res_ipw1$t)
+se_ipw2 <- sd(res_ipw2$t)
+se_aipw <- sd(res_aipw$t)
+se_ipw1_fdrs <- sd(res_ipw1_fdrs$t)
+se_ipw2_fdrs <- sd(res_ipw2_fdrs$t)
+se_aipw_fdrs <- sd(res_aipw_fdrs$t)
+
+# 95% CI
+ci_ipw1 <- boot.ci(res_ipw1, type = "perc")
+ci_ipw2 <- boot.ci(res_ipw2, type = "perc")
+ci_aipw <- boot.ci(res_aipw, type = "perc")
+ci_ipw1_fdrs <- boot.ci(res_ipw1_fdrs, type = "perc")
+ci_ipw2_fdrs <- boot.ci(res_ipw2_fdrs, type = "perc")
+ci_aipw_fdrs <- boot.ci(res_aipw_fdrs, type = "perc")
+
+### Print Results for Standard Error and 95% Confidence Intervals
+
+# 1. IPW_1
+print(IPW_1)
+print(paste("Bootstrap SE for ipw1:", se_ipw1))
+print(paste("95% CI for ipw1:", ci_ipw1$percent[4], "-", ci_ipw1$percent[5]))
+
+# 2. IPW_2
+print(IPW_2)
+print(paste("Bootstrap SE for ipw2:", se_ipw2))
+print(paste("95% CI for ipw2:", ci_ipw2$percent[4], "-", ci_ipw2$percent[5]))
+
+# 3. AIPW
+print(AIPW)
+print(paste("Bootstrap SE for aipw:", se_aipw))
+print(paste("95% CI for aipw:", ci_aipw$percent[4], "-", ci_aipw$percent[5]))
+
+# 4. IPW_1_fdrs
+print(IPW_1_fdrs)
+print(paste("Bootstrap SE for ipw1_fdrs:", se_ipw1_fdrs))
+print(paste("95% CI for ipw1_fdrs:", ci_ipw1_fdrs$percent[4], "-", ci_ipw1_fdrs$percent[5]))
+
+# 5. IPW_2_fdrs
+print(IPW_2_fdrs)
+print(paste("Bootstrap SE for ipw2_fdrs:", se_ipw2_fdrs))
+print(paste("95% CI for ipw2_fdrs:", ci_ipw2_fdrs$percent[4], "-", ci_ipw2_fdrs$percent[5]))
+
+# 3. AIPW_fdrs
+print(AIPW_fdrs)
+print(paste("Bootstrap SE for aipw:", se_aipw_fdrs))
+print(paste("95% CI for aipw_fdrs:", ci_aipw_fdrs$percent[4], "-", ci_aipw_fdrs$percent[5]))
