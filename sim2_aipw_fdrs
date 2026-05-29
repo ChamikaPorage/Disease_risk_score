@@ -13,6 +13,7 @@ suppressPackageStartupMessages({
   library(stats)
 })
 
+# ---------------- helpers ----------------
 clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) pmin(pmax(p, lo), hi)
 expit  <- function(x) 1/(1 + exp(-x))
 
@@ -102,6 +103,15 @@ gen.data.C <- function(N, seed, n_rep = 1, delta = log(2)) {
 # ============================================================
 # AIPW with FDRS-based OR + PS  + sandwich SE
 #
+# Intercept rules (IMPORTANT):
+# - X1 is built with model.matrix(reformulate(xvars), ...) and includes "(Intercept)" by default.
+# - lm.fit() and glm.fit() do NOT add intercepts automatically; they use x as-is.
+# - Therefore:
+#   * Stage 1 regressions on X1 include an intercept automatically (because X1 has it).
+#   * For Stage 2 regressions on FDRS, we must manually add an intercept column if we want one.
+#   * For PS on FDRS WITH intercept, we must manually add an intercept column, then use
+#     glm.fit(..., intercept = FALSE) to avoid double-intercepts.
+#
 # PS uses augmented regressor (1, m1, m0).
 #
 # theta = (beta1[K], beta0[K], alpha1[3], alpha0[3], gamma[3], mu1, mu0, tau)
@@ -119,7 +129,8 @@ aipw_geex_fdrs <- function(dat, xvars = NULL) {
   Y  <- dat$Y
   Tt <- dat$Tr
   
-  # ----- Stage 1: Outcome models on raw X (linear) -----
+  # ----- Stage 1: working outcome models on raw X (linear) -----
+  # m1(X)=X1^T beta1 fit on treated; m0(X)=X1^T beta0 fit on controls
   fit1 <- lm.fit(x = X1[Tt == 1, , drop = FALSE], y = Y[Tt == 1])
   fit0 <- lm.fit(x = X1[Tt == 0, , drop = FALSE], y = Y[Tt == 0])
   
@@ -132,11 +143,13 @@ aipw_geex_fdrs <- function(dat, xvars = NULL) {
   # FDRS regressors (2-dim): [m1, m0]
   Xf_core <- cbind(m1 = m1_0, m0 = m0_0)  # n x 2
   
-  # Augmented FDRS regressor WITH intercept: [1, m1, m0]
+  # Augmented FDRS regressor WITH intercept (paper-style): [1, m1, m0]
   Xf <- cbind(`(Intercept)` = 1, Xf_core) # n x 3
   pg <- ncol(Xf)  # = 3
   
-  # ----- Stage 2: Outcome models on augmented FDRS (linear) -----
+  # ----- Stage 2: working outcome models on augmented FDRS (linear) -----
+  # mu1(X)=alpha1^T Xf, fit on treated
+  # mu0(X)=alpha0^T Xf, fit on controls
   fit_mu1 <- lm.fit(x = Xf[Tt == 1, , drop = FALSE], y = Y[Tt == 1])
   fit_mu0 <- lm.fit(x = Xf[Tt == 0, , drop = FALSE], y = Y[Tt == 0])
   
@@ -152,14 +165,14 @@ aipw_geex_fdrs <- function(dat, xvars = NULL) {
   gamma0 <- as.numeric(coef(fitps)); gamma0[is.na(gamma0)] <- 0
   e0     <- clip01(expit(drop(Xf %*% gamma0)))
   
-  # ----- AIPW plug-in  -----
+  # ----- AIPW plug-in starters (paper's form) -----
   mu1_0 <- mean(mu1x_0 + Tt * (Y - mu1x_0) / e0)
   mu0_0 <- mean(mu0x_0 + (1 - Tt) * (Y - mu0x_0) / (1 - e0))
   tau_0 <- mu1_0 - mu0_0
   
   theta0 <- c(beta1_0, beta0_0, alpha1_0, alpha0_0, gamma0, mu1_0, mu0_0, tau_0)
   
-  # data passed to geex 
+  # data passed to geex (need X1 columns; FDRS/augmented FDRS computed inside estFUN)
   units <- data.frame(
     Y  = Y,
     Tt = Tt,
@@ -194,13 +207,13 @@ aipw_geex_fdrs <- function(dat, xvars = NULL) {
       # PS on augmented FDRS
       e <- clip01(expit(sum(gamma * xf)))
       
-      # --- stacked estimating equations ---
+      # --- stacked estimating equations (paper-style) ---
       
-      # Stage 1 score equations for beta's (linear)
+      # Stage 1 score equations for beta's (linear; by arm)
       psi_b1 <- (data$Tt)     * (data$Y - m1) * x1
       psi_b0 <- (1 - data$Tt) * (data$Y - m0) * x1
       
-      # Stage 2 score equations for alpha's (linear on augmented FDRS)
+      # Stage 2 score equations for alpha's (linear on augmented FDRS; by arm)
       psi_a1 <- (data$Tt)     * (data$Y - mu1x) * xf
       psi_a0 <- (1 - data$Tt) * (data$Y - mu0x) * xf
       
@@ -233,9 +246,9 @@ aipw_geex_fdrs <- function(dat, xvars = NULL) {
     se_tau  = sqrt(V[idx_tau, idx_tau])
   )
 }
-# ==========
-# Summary 
-# ==========
+# ============================================================
+# Summary function
+# ============================================================
 summarize_results <- function(res, alpha = 0.05) {
   z <- qnorm(1 - alpha/2)
   
@@ -258,9 +271,9 @@ summarize_results <- function(res, alpha = 0.05) {
   )
 }
 
-# ===========
+# ============================================================
 # RUN
-# ===========
+# ============================================================
 cat("\n#############################\n")
 cat("# Simulation: Witte & Didelez (Setup 1) — AIPW based on FDRS\n")
 cat("#############################\n")
@@ -303,4 +316,4 @@ cat("\nSummary:\n")
 print(round(summarize_results(res), 3))
 
 S2_AIPW_fpgs <- res |> dplyr::filter(!is.na(tau))
-write.csv(S2_AIPW_fpgs, file = "...../Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S2_aipw_fpgs.csv", row.names = FALSE)
+write.csv(S2_AIPW_fpgs, file = "C:/Users/chapo752/Dropbox/PhD work- Chamika Porage/Paper3_Disease risk score/Simulation_study/Simulation_new/box plots/S2_aipw_fpgs.csv", row.names = FALSE)
