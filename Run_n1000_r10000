@@ -1,0 +1,292 @@
+############################################################
+# run_simulations.R
+# N=1000, R=10000
+############################################################
+
+suppressPackageStartupMessages({
+  library(dplyr)
+})
+
+############################################################
+# 1. Source files
+############################################################
+
+source("...../Simulation 1.R")
+
+source("...../Simulation 2.R")
+
+source("..../Estimators.R")
+
+############################################################
+# 2. Summary function
+############################################################
+
+summarize_results <- function(res, alpha = 0.05) {
+  z <- qnorm(1 - alpha / 2)
+  
+  ok <- is.finite(res$tau) &
+    is.finite(res$se) &
+    res$se > 0 &
+    is.finite(res$truth)
+  
+  r <- res[ok, , drop = FALSE]
+  
+  if (nrow(r) == 0) {
+    return(data.frame(
+      estimator = unique(res$estimator)[1],
+      dgp = unique(res$dgp)[1],
+      N = unique(res$N)[1],
+      R_total = nrow(res),
+      R_used = 0,
+      n_fail = nrow(res),
+      mean_tau = NA_real_,
+      truth_used = unique(res$truth)[1],
+      bias = NA_real_,
+      mse = NA_real_,
+      emp_sd = NA_real_,
+      mean_se = NA_real_,
+      cover_95 = NA_real_
+    ))
+  }
+  
+  ci_lo <- r$tau - z * r$se
+  ci_hi <- r$tau + z * r$se
+  
+  data.frame(
+    estimator = unique(r$estimator)[1],
+    dgp = unique(r$dgp)[1],
+    N = unique(r$N)[1],
+    R_total = nrow(res),
+    R_used = nrow(r),
+    n_fail = nrow(res) - nrow(r),
+    mean_tau = mean(r$tau),
+    truth_used = unique(r$truth)[1],
+    bias = mean(r$tau - r$truth),
+    mse = mean((r$tau - r$truth)^2),
+    emp_sd = sd(r$tau),
+    mean_se = mean(r$se),
+    cover_95 = mean(ci_lo <= r$truth & r$truth <= ci_hi)
+  )
+}
+
+############################################################
+# print summary tables
+############################################################
+
+round_df <- function(x, digits = 3) {
+  num_cols <- sapply(x, is.numeric)
+  x[num_cols] <- round(x[num_cols], digits)
+  x
+}
+############################################################
+# 3. Single estimator wrapper
+############################################################
+
+fit_one_rep <- function(d, estimator_fun, estimator_name, truth, dgp_name, N, rep_id) {
+  
+  d$Y <- d$y
+  d$Tr <- d$tr
+  
+  x_var <- grep("^[xX][0-9]+$", names(d), value = TRUE)
+  
+  d2 <- d[, c("Y", "Tr", x_var), drop = FALSE]
+  
+  fit <- tryCatch(
+    estimator_fun(d2, x_var = x_var),
+    error = function(e) NULL
+  )
+  
+  if (
+    is.null(fit) ||
+    !is.list(fit) ||
+    is.null(fit$tau_hat) ||
+    is.null(fit$se_tau) ||
+    !is.finite(fit$tau_hat) ||
+    !is.finite(fit$se_tau) ||
+    fit$se_tau <= 0
+  ) {
+    return(data.frame(
+      dgp = dgp_name,
+      estimator = estimator_name,
+      N = N,
+      rep = rep_id,
+      tau = NA_real_,
+      se = NA_real_,
+      truth = truth
+    ))
+  }
+  
+  data.frame(
+    dgp = dgp_name,
+    estimator = estimator_name,
+    N = N,
+    rep = rep_id,
+    tau = fit$tau_hat,
+    se = fit$se_tau,
+    truth = truth
+  )
+}
+
+############################################################
+# 4. Run one DGP for all six estimators
+############################################################
+
+run_one_dgp <- function(datasets, dgp_name, truth, N) {
+  
+  estimators <- list(
+    IPW_1 = ipw_geex_simple,
+    IPW_2 = nipw_geex,
+    AIPW = aipw_geex,
+    IPW_1_fdrs = ipw_geex_fdrs,
+    IPW_2_fdrs = nipw_geex_fdrs,
+    AIPW_fdrs = aipw_geex_fdrs
+  )
+  
+  out <- list()
+  k <- 1
+  
+  for (est_name in names(estimators)) {
+    cat("\nRunning", dgp_name, "-", est_name, "\n")
+    
+    est_fun <- estimators[[est_name]]
+    
+    res_est <- do.call(rbind, lapply(seq_along(datasets), function(r) {
+      fit_one_rep(
+        d = datasets[[r]],
+        estimator_fun = est_fun,
+        estimator_name = est_name,
+        truth = truth,
+        dgp_name = dgp_name,
+        N = N,
+        rep_id = r
+      )
+    }))
+    
+    out[[k]] <- res_est
+    k <- k + 1
+    
+    cat("Finished", dgp_name, "-", est_name, "\n")
+    
+    tmp <- summarize_results(res_est)
+    print(round_df(tmp, 3))
+  }
+  
+  bind_rows(out)
+}
+
+############################################################
+# 5. Main simulation settings
+############################################################
+
+N <- 1000
+R <- 10000
+seed <- 2025
+delta <- log(2)
+
+# Fixed population truths
+truth_hajage_B <- 0.073
+truth_wd_setup1 <- 0.227
+
+# Hajage B parameters
+
+alpha0_B <- -1.5
+beta0_B  <- -2
+gamma_B  <- log(1.5)
+
+############################################################
+# 6. Generate datasets
+############################################################
+
+cat("\nGenerating Hajage DGP B datasets...\n")
+datasets_B <- gen_data_hajage_B(
+  N = N,
+  seed = seed,
+  n_rep = R,
+  alpha0 = alpha0_B,
+  beta0 = beta0_B,
+  gamma = gamma_B,
+  
+  delta = delta
+)
+
+cat("\nGenerating Witte & Didelez Setup 1 datasets...\n")
+datasets_WD <- gen_data_wd_setup1(
+  N = N,
+  seed = seed,
+  n_rep = R,
+  delta = delta
+)
+
+############################################################
+# 7. Run simulations
+############################################################
+
+cat("\n#############################\n")
+cat("# Simulation: Hajage DGP B\n")
+cat("#############################\n")
+
+res_B <- run_one_dgp(
+  datasets = datasets_B,
+  dgp_name = "Hajage_B",
+  truth = truth_hajage_B,
+  N = N
+)
+
+cat("\n#############################\n")
+cat("# Simulation: Witte & Didelez Setup 1\n")
+cat("#############################\n")
+
+res_WD <- run_one_dgp(
+  datasets = datasets_WD,
+  dgp_name = "Witte_Didelez_Setup1",
+  truth = truth_wd_setup1,
+  N = N
+)
+
+############################################################
+# 8. Combine and summarize
+############################################################
+
+res_all <- bind_rows(res_B, res_WD)
+
+summary_all <- bind_rows(
+  lapply(
+    split(res_all, list(res_all$dgp, res_all$estimator), drop = TRUE),
+    summarize_results
+  )
+)
+
+cat("\nFinal summary:\n")
+print(round_df(summary_all, 3))
+
+############################################################
+# 9. Save results
+############################################################
+
+out_dir <- "simulation_results_N1000"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+write.csv(
+  res_all,
+  file = file.path(out_dir, "simulation_raw_results_N1000.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  summary_all,
+  file = file.path(out_dir, "simulation_summary_results_N1000.csv"),
+  row.names = FALSE
+)
+
+# Optional estimator-specific files for box plots
+split_results <- split(res_all, paste(res_all$dgp, res_all$estimator, sep = "_"))
+
+invisible(lapply(names(split_results), function(nm) {
+  write.csv(
+    split_results[[nm]],
+    file = file.path(out_dir, paste0(nm, "_N", N, ".csv")),
+    row.names = FALSE
+  )
+}))
+
+cat("\nSaved raw and summary results in:", normalizePath(out_dir), "\n")
