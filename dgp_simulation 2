@@ -1,0 +1,101 @@
+############################################################
+# Simulation 2
+# Witte & Didelez (2018), Setup 1, mixed-scale covariates
+# Binary outcome + effect modification through X2*T
+# True population ATE ~ 0.227
+############################################################
+
+clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) {
+  pmin(pmax(p, lo), hi)
+}
+
+expit <- function(x) {
+  1 / (1 + exp(-x))
+}
+
+# ---------- parameters ----------
+beta3_U <- 1
+beta8_2 <- 1
+betaT1  <- 1
+betaT2  <- 1
+betaY_U <- 1
+betaY5  <- 1
+
+beta5_4 <- 3
+beta8_6 <- 3
+betaT3  <- 3
+betaT4  <- 3
+betaY6  <- 3
+betaY7  <- 3
+
+betaT0  <- 0.7
+betaY0  <- 1.1
+betaY_T <- 1.5
+
+# ---------- Witte & Didelez Setup 1 ----------
+gen_data_wd_setup1 <- function(N,
+                               seed,
+                               n_rep = 1,
+                               delta = log(2)) {
+  set.seed(seed)
+  dat_list <- vector("list", n_rep)
+
+  p_bin <- plogis(-2)
+
+  i <- 0
+  while (i < n_rep) {
+
+    # Exogenous and baseline covariates
+    U  <- rnorm(N)
+    X1 <- rnorm(N)
+    X2 <- rnorm(N)
+
+    # Mixed-scale covariates
+    pX3 <- plogis(-2 + beta3_U * U)
+    X3  <- rbinom(N, 1, pX3)
+
+    X4 <- rbinom(N, 1, p_bin)
+    X6 <- rbinom(N, 1, p_bin)
+    X7 <- rbinom(N, 1, p_bin)
+    X9 <- rbinom(N, 1, p_bin)
+
+    X5 <- as.numeric(scale(beta5_4 * X4 + rnorm(N)))
+    X8 <- as.numeric(scale(beta8_2 * X2 + beta8_6 * X6 + rnorm(N)))
+
+    # Treatment model
+    lp_T <- -betaT0 + betaT1 * X1 + betaT2 * X2 + betaT3 * X3 + betaT4 * X4
+    ps_true <- plogis(lp_T)
+    tr <- rbinom(N, 1, ps_true)
+
+    if (length(unique(tr)) < 2) next
+
+    # Outcome model with effect modification in Y(1)
+    base_lp <- -betaY0 + betaY_U * U + betaY5 * X5 + betaY6 * X6 + betaY7 * X7
+
+    pY0_true <- plogis(base_lp)
+    pY1_true <- plogis(base_lp + betaY_T + delta * X2)
+
+    y0 <- rbinom(N, 1, pY0_true)
+    y1 <- rbinom(N, 1, pY1_true)
+    y  <- ifelse(tr == 1, y1, y0)
+
+    i <- i + 1
+    dat_list[[i]] <- data.frame(
+      y = y,
+      tr = tr,
+      X1 = X1,
+      X2 = X2,
+      X3 = X3,
+      X4 = X4,
+      X5 = X5,
+      X6 = X6,
+      X7 = X7,
+      X8 = X8,
+      X9 = X9,
+      U = U,
+      check.names = FALSE
+    )
+  }
+
+  dat_list
+}
