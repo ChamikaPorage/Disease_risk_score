@@ -1,0 +1,73 @@
+############################################################
+# Simulation 1
+# Hajage DGP B
+# Binary treatment, binary outcome
+# True population ATE ~ 0.073
+############################################################
+
+
+clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) {
+  pmin(pmax(p, lo), hi)
+}
+
+expit <- function(x) {
+  1 / (1 + exp(-x))
+}
+
+# ---------- coefficient vectors: Hajage Table II ----------
+Alpha_vec <- c(
+  log(1.5), log(2), log(2.5),
+  log(1.5), log(2), log(2.5),
+  0, 0, 0
+)
+
+Beta_vec <- c(
+  log(1.5), log(2), log(2.5),
+  0, 0, 0,
+  log(1.5), log(2), log(2.5)
+)
+
+# ---------- Hajage DGP B ----------
+gen_data_hajage_B <- function(N,
+                              seed,
+                              n_rep = 1,
+                              alpha0,
+                              beta0,
+                              gamma,
+                              delta = log(2)) {
+  set.seed(seed)
+  dat_list <- vector("list", n_rep)
+
+  i <- 0
+  while (i < n_rep) {
+
+    # Covariates
+    X <- matrix(rnorm(N * 9), ncol = 9)
+    colnames(X) <- paste0("x", 1:9)
+
+    # Treatment model
+    ps_true <- plogis(alpha0 + drop(X %*% Alpha_vec))
+    tr <- rbinom(N, 1, ps_true)
+
+    if (length(unique(tr)) < 2) next
+
+    # Potential outcome 
+    x2 <- X[, "x2"]
+    lp0 <- beta0 + drop(X %*% Beta_vec)
+    pY0 <- plogis(lp0)
+    pY1 <- plogis(lp0 + gamma + delta * x2)
+
+    # Observed outcome
+    y <- rbinom(N, 1, ifelse(tr == 1, pY1, pY0))
+
+    i <- i + 1
+    dat_list[[i]] <- data.frame(
+      y = y,
+      tr = tr,
+      X,
+      check.names = FALSE
+    )
+  }
+
+  dat_list
+}
