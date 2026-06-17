@@ -10,7 +10,7 @@ suppressPackageStartupMessages({
 })
 
 datat <- read.csv(
-  file = "C:/Users/chapo752/Dropbox/PhD work- Chamika Porage/Paper3_Disease risk score/Simulation_study/Simulation_new/Empirical analysis/final_df.csv"
+  file = "..../final_df.csv"
 )
 
 clip01 <- function(p, lo = 1e-6, hi = 1 - 1e-6) {
